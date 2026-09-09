@@ -32,6 +32,7 @@ See README.md for how to set up the Director-side Console/Profile this expects.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from typing import Any
 
@@ -204,14 +205,13 @@ def cancel_job(jobid: int, confirm: bool = False) -> Any:
 
 
 @mcp.tool(annotations=READ_ONLY)
-def bvfs_get_jobids(client: str, jobid: int = 0) -> Any:
-    """Resolve the job ids that make up client's most recent restorable backup set (latest full
-    plus subsequent differential/incrementals). Pass jobid to instead resolve the set as of that
-    specific job. First step of a restore."""
-    cmd = f".bvfs_get_jobids client={client}"
-    if jobid:
-        cmd += f" jobid={jobid}"
-    return _call(cmd)
+def bvfs_get_jobids(jobid: int) -> Any:
+    """Resolve the full restorable job set (that job plus any earlier full/differential/
+    incremental jobs needed to restore its client as of that point) from one job id belonging to
+    the client you want to restore. Find a candidate job id first with list_jobs(client=...,
+    jobstatus="T"). First step of a restore. Note: despite the Bareos command name, this needs a
+    job id, not a bare client name — passing only a client is rejected by the Director."""
+    return _call(f".bvfs_get_jobids jobid={jobid}")
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -235,15 +235,19 @@ def bvfs_lsfiles(jobid: str, path: str = "") -> Any:
 
 
 @mcp.tool(annotations=READ_ONLY)
-def bvfs_restore(jobid: str, path: str = "", fileid: str = "", dirid: str = "") -> Any:
+def bvfs_restore(jobid: str, selection_name: str, fileid: str = "", dirid: str = "") -> Any:
     """Build a restore selection on the Director from bvfs ids gathered via bvfs_lsdirs/
-    bvfs_lsfiles (dirid to select whole directories recursively, fileid for individual files —
-    comma-separated lists of the 'pathid'/'fileid' values from those tools), or path for a whole
-    subtree by bvfs path. Returns how to reference the selection in restore_job's `file` argument
-    (see the Director's response — typically a '?b2<jobid>'-style selection name)."""
-    cmd = f".bvfs_restore jobid={jobid}"
-    if path:
-        cmd += f' path="{path}"'
+    bvfs_lsfiles: dirid to select whole directories recursively (comma-separated 'pathid' values),
+    fileid for individual files (comma-separated 'fileid' values) — pass at least one of the two.
+
+    selection_name is NOT a bvfs browse path, despite Bareos calling this parameter `path=` on
+    the wire — it's an arbitrary name for the restore list Bareos builds server-side, and must
+    match `b2<digits>` (e.g. "b21") or the Director silently no-ops with "Can't create restore
+    list" instead of a real error (verified live against a real Director). Pass restore_job's
+    `file_selection` as `?<selection_name>` (e.g. "?b21") to use what this builds."""
+    if not re.fullmatch(r"b2\d+", selection_name):
+        raise ValueError('selection_name must match "b2<digits>" (e.g. "b21") — Bareos silently no-ops otherwise')
+    cmd = f".bvfs_restore jobid={jobid} path={selection_name}"
     if fileid:
         cmd += f" fileid={fileid}"
     if dirid:
@@ -260,10 +264,10 @@ def restore_job(
     storage: str = "",
     confirm: bool = False,
 ) -> Any:
-    """Launch a restore job for a selection built with bvfs_restore. `file_selection` is the
-    selection reference bvfs_restore's response indicates (e.g. '?b2<jobid>'). Restores into
-    `restore_client` (defaults to `client`) under `where` — never restores in place unless you
-    explicitly pass where="". Pass storage=<name> to target a specific Storage resource (e.g. one
+    """Launch a restore job for a selection built with bvfs_restore. `file_selection` is
+    "?<selection_name>" using the same selection_name passed to bvfs_restore (e.g. "?b21").
+    Restores into `restore_client` (defaults to `client`) under `where` — never restores in place
+    unless you explicitly pass where="". Pass storage=<name> to target a specific Storage resource (e.g. one
     your Director reserves for restore/verify jobs, if it has one) instead of the catalog's
     default. Call once with confirm=False (default) to preview; call again with confirm=True to
     actually launch it."""
